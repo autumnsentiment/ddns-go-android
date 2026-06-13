@@ -61,3 +61,12 @@ app/build/outputs/apk/debug/app-debug.apk
 - The ddns-go service and Web UI are provided by the upstream ddns-go project.
 - This Android wrapper is intended to improve Android runtime behavior,
   background service stability, LAN access, IPv6 access, and WebView rendering.
+
+## License
+
+This Android wrapper is released under the MIT License. See [LICENSE](LICENSE).
+
+The bundled ddns-go service is from the upstream MIT-licensed ddns-go project:
+https://github.com/jeessy2/ddns-go
+
+See [NOTICE.md](NOTICE.md) for upstream copyright and license attribution.
