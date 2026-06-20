@@ -8,6 +8,10 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
@@ -23,10 +27,12 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
+import java.net.URL;
 
 public class DdnsGoService extends Service {
 
@@ -39,13 +45,31 @@ public class DdnsGoService extends Service {
     private static final String LISTEN_ADDRESS = ":" + PORT;
     private static final long PROCESS_RESTART_DELAY_MS = 3000L;
     private static final long SERVICE_RESTART_DELAY_MS = 2000L;
+    private static final long WATCHDOG_INTERVAL_MS = 5 * 60 * 1000L;
+    private static final long HEALTH_CHECK_INTERVAL_MS = 60 * 1000L;
+    private static final long HEALTH_START_GRACE_MS = 20 * 1000L;
+    private static final int HEALTH_FAILURE_LIMIT = 3;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable healthCheckRunnable = new Runnable() {
+        @Override
+        public void run() {
+            runHealthCheck();
+            if (!destroyed) {
+                mainHandler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS);
+            }
+        }
+    };
+
     private Process ddnsGoProcess;
     private boolean startRequested;
     private boolean destroyed;
+    private int failedHealthChecks;
+    private long processStartElapsed;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private boolean networkCallbackRegistered;
 
     public static String getLocalWebUrl() {
         return "http://127.0.0.1:" + PORT + "/";
@@ -75,6 +99,7 @@ public class DdnsGoService extends Service {
         super.onCreate();
         destroyed = false;
         createNotificationChannel();
+        registerNetworkCallback();
     }
 
     @Override
@@ -103,6 +128,8 @@ public class DdnsGoService extends Service {
         startForeground(NOTIFICATION_ID, notification);
 
         acquireKeepAliveLocks();
+        scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
+        scheduleHealthCheck(HEALTH_CHECK_INTERVAL_MS);
         startDdnsGo();
 
         return START_STICKY;
@@ -143,6 +170,8 @@ public class DdnsGoService extends Service {
                 pb.environment().put("HOME", getFilesDir().getAbsolutePath());
                 process = pb.start();
                 ddnsGoProcess = process;
+                processStartElapsed = SystemClock.elapsedRealtime();
+                failedHealthChecks = 0;
                 logProcessOutput(process);
                 int exitCode = process.waitFor();
                 Log.w(TAG, "ddns-go exited with code " + exitCode);
@@ -156,10 +185,70 @@ public class DdnsGoService extends Service {
                     startRequested = false;
                 }
                 if (!destroyed && shouldRestart) {
+                    scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
                     mainHandler.postDelayed(this::startDdnsGo, PROCESS_RESTART_DELAY_MS);
                 }
             }
         }, "ddns-go-runner").start();
+    }
+
+    private void scheduleHealthCheck(long delayMs) {
+        mainHandler.removeCallbacks(healthCheckRunnable);
+        mainHandler.postDelayed(healthCheckRunnable, delayMs);
+    }
+
+    private void runHealthCheck() {
+        if (destroyed || startRequested) {
+            return;
+        }
+        scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
+        if (!isProcessAlive(ddnsGoProcess)) {
+            Log.w(TAG, "Health check found ddns-go stopped, starting it");
+            startDdnsGo();
+            return;
+        }
+        if (SystemClock.elapsedRealtime() - processStartElapsed < HEALTH_START_GRACE_MS) {
+            return;
+        }
+        if (isLocalWebReady()) {
+            failedHealthChecks = 0;
+            return;
+        }
+        failedHealthChecks++;
+        Log.w(TAG, "Health check failed " + failedHealthChecks + "/" + HEALTH_FAILURE_LIMIT);
+        if (failedHealthChecks >= HEALTH_FAILURE_LIMIT) {
+            failedHealthChecks = 0;
+            restartDdnsGoProcess();
+        }
+    }
+
+    private boolean isLocalWebReady() {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(getLocalWebUrl()).openConnection();
+            connection.setConnectTimeout(1200);
+            connection.setReadTimeout(1200);
+            connection.setUseCaches(false);
+            return connection.getResponseCode() > 0;
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private void restartDdnsGoProcess() {
+        Log.w(TAG, "Restarting ddns-go after health check failures");
+        Process process;
+        synchronized (this) {
+            process = ddnsGoProcess;
+        }
+        if (isProcessAlive(process)) {
+            process.destroy();
+        }
+        mainHandler.postDelayed(this::startDdnsGo, PROCESS_RESTART_DELAY_MS);
     }
 
     private File resolveDdnsGoExecutable() {
@@ -257,6 +346,62 @@ public class DdnsGoService extends Service {
         }
     }
 
+    private void registerNetworkCallback() {
+        if (networkCallbackRegistered) {
+            return;
+        }
+        try {
+            ConnectivityManager connectivityManager =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (connectivityManager == null) {
+                return;
+            }
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    mainHandler.postDelayed(() -> {
+                        scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
+                        startDdnsGo();
+                        runHealthCheck();
+                    }, PROCESS_RESTART_DELAY_MS);
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    mainHandler.postDelayed(() -> {
+                        scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
+                        runHealthCheck();
+                    }, PROCESS_RESTART_DELAY_MS);
+                }
+            };
+            connectivityManager.registerNetworkCallback(request, networkCallback);
+            networkCallbackRegistered = true;
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to register network callback", e);
+        }
+    }
+
+    private void unregisterNetworkCallback() {
+        if (!networkCallbackRegistered || networkCallback == null) {
+            return;
+        }
+        try {
+            ConnectivityManager connectivityManager =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (connectivityManager != null) {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to unregister network callback", e);
+        } finally {
+            networkCallbackRegistered = false;
+            networkCallback = null;
+        }
+    }
+
     private void logProcessOutput(Process process) {
         new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(
@@ -291,6 +436,7 @@ public class DdnsGoService extends Service {
         if (isProcessAlive(ddnsGoProcess)) {
             ddnsGoProcess.destroy();
         }
+        unregisterNetworkCallback();
         releaseKeepAliveLocks();
     }
 
@@ -321,8 +467,12 @@ public class DdnsGoService extends Service {
     }
 
     private void scheduleServiceRestart() {
+        scheduleWatchdogAlarm(SERVICE_RESTART_DELAY_MS);
+    }
+
+    private void scheduleWatchdogAlarm(long delayMs) {
         Intent restartIntent = new Intent(getApplicationContext(), DdnsGoRestartReceiver.class);
-        restartIntent.setAction(DdnsGoRestartReceiver.ACTION_RESTART);
+        restartIntent.setAction(DdnsGoRestartReceiver.ACTION_WATCHDOG);
         PendingIntent pendingIntent = PendingIntent.getBroadcast(
                 getApplicationContext(),
                 1,
