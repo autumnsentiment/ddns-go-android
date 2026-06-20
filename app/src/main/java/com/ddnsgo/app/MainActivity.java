@@ -19,6 +19,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -49,7 +50,6 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
 
         requestPermissions();
-        requestDisableBatteryOptimizations();
 
         startDdnsGoService();
 
@@ -59,6 +59,7 @@ public class MainActivity extends AppCompatActivity {
         showStatusPage("Starting ddns-go", "Local page: " + DdnsGoService.getLocalWebUrl()
                 + "<br>LAN page:<br>" + htmlBreaks(DdnsGoService.getLanWebUrl()));
         loadWhenServerReady(0);
+        mainHandler.postDelayed(this::requestDisableBatteryOptimizations, 1200L);
     }
 
     private void requestPermissions() {
@@ -81,13 +82,30 @@ public class MainActivity extends AppCompatActivity {
             if (powerManager == null || powerManager.isIgnoringBatteryOptimizations(getPackageName())) {
                 return;
             }
+            new AlertDialog.Builder(this)
+                    .setTitle("允许后台持续运行")
+                    .setMessage("ddns-go 需要在后台保持服务监听。请在接下来的系统弹窗中选择允许，将 ddns-go 加入电池优化白名单。")
+                    .setPositiveButton("去允许", (dialog, which) -> openBatteryOptimizationRequest())
+                    .setNegativeButton("稍后", null)
+                    .show();
+        } catch (Exception ignored) {
+            openBatteryOptimizationSettings();
+        }
+    }
+
+    private void openBatteryOptimizationRequest() {
+        try {
             Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
             intent.setData(Uri.parse("package:" + getPackageName()));
             startActivity(intent);
         } catch (Exception ignored) {
-            Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
-            startActivity(intent);
+            openBatteryOptimizationSettings();
         }
+    }
+
+    private void openBatteryOptimizationSettings() {
+        Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+        startActivity(intent);
     }
 
     private void startDdnsGoService() {
