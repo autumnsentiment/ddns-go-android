@@ -23,6 +23,8 @@ Upstream source:
 - Improves WebView rendering compatibility for the ddns-go UI.
 - Fixes Android WebView JavaScript errors such as
   `ReferenceError: defaultDnsConf is not defined`.
+- Defaults new Android WebView configurations to IPv6-first and avoids saving
+  stale IPv4 update fields when IPv4 is disabled or no IPv4 domain is set.
 - Preserves WebView cookies for login/session flow.
 
 ## Access
@@ -61,6 +63,8 @@ app/build/outputs/apk/debug/app-debug.apk
 - The ddns-go service and Web UI are provided by the upstream ddns-go project.
 - This Android wrapper is intended to improve Android runtime behavior,
   background service stability, LAN access, IPv6 access, and WebView rendering.
+- If a hostname still resolves to IPv4 after IPv4 is disabled, remove any stale
+  A record at the DNS provider and wait for DNS cache/TTL expiry.
 
 ## License
 

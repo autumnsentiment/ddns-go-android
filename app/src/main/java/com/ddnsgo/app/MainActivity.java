@@ -363,6 +363,7 @@ public class MainActivity extends AppCompatActivity {
             return patched;
         }
         patched = patched
+                .replace("Ipv4Enable: true,", "Ipv4Enable: false,")
                 .replace("reloadConf(resp.dnsConf);", "__ddnsGoFillNetInterfaces();reloadConf(resp.dnsConf);__ddnsGoFillNetInterfaces();")
                 .replace("reloadConf(\"{{.DnsConf}}\");", "__ddnsGoRestoreNetInterfaceConf();__ddnsGoFillNetInterfaces();reloadConf(\"{{.DnsConf}}\");__ddnsGoRestoreNetInterfaceConf();__ddnsGoFillNetInterfaces();")
                 .replace("showConf(configIndex);", "__ddnsGoRestoreNetInterfaceConf();__ddnsGoFillNetInterfaces();showConf(configIndex);")
@@ -386,8 +387,10 @@ public class MainActivity extends AppCompatActivity {
                 + "__ddnsGoFillNetSelect('Ipv6NetInterface',data.ipv6,'Ipv6NetInterfaceHelp','Ipv6NetInterfaceHelp');"
                 + "}"
                 + "function __ddnsGoFindAndroidIface(version,nameOrCmd){var list=((__ddnsGoAndroidNetInterfaces||{})[version]||[]);for(var i=0;i<list.length;i++){var item=list[i]||{};if(item.name===nameOrCmd||item.cmd===nameOrCmd){return item;}}return null;}"
+                + "function __ddnsGoHasText(value){return typeof value==='string'&&value.trim().length>0;}"
+                + "function __ddnsGoDisableIpv4(conf){conf.Ipv4Enable=false;conf.Ipv4GetType='url';conf.Ipv4Url='';conf.Ipv4NetInterface='';conf.Ipv4Cmd='';conf.Ipv4Domains='';}"
                 + "function __ddnsGoRestoreNetInterfaceConf(){if(!window.dnsConf||!Array.isArray(window.dnsConf)){return;}for(var i=0;i<window.dnsConf.length;i++){var conf=window.dnsConf[i];if(!conf){continue;}var v4=__ddnsGoFindAndroidIface('ipv4',conf.Ipv4Cmd);if(v4&&conf.Ipv4GetType==='cmd'){conf.Ipv4GetType='netInterface';conf.Ipv4NetInterface=v4.name;}var v6=__ddnsGoFindAndroidIface('ipv6',conf.Ipv6Cmd);if(v6&&conf.Ipv6GetType==='cmd'){conf.Ipv6GetType='netInterface';conf.Ipv6NetInterface=v6.name;}}}"
-                + "function __ddnsGoPrepareDnsConfForSave(source){var list=JSON.parse(JSON.stringify(source||[]));for(var i=0;i<list.length;i++){var conf=list[i];if(!conf){continue;}var v4=__ddnsGoFindAndroidIface('ipv4',conf.Ipv4NetInterface);if(conf.Ipv4GetType==='netInterface'&&v4&&v4.cmd){conf.Ipv4GetType='cmd';conf.Ipv4Cmd=v4.cmd;}var v6=__ddnsGoFindAndroidIface('ipv6',conf.Ipv6NetInterface);if(conf.Ipv6GetType==='netInterface'&&v6&&v6.cmd){conf.Ipv6GetType='cmd';conf.Ipv6Cmd=v6.cmd;}}return list;}"
+                + "function __ddnsGoPrepareDnsConfForSave(source){var list=JSON.parse(JSON.stringify(source||[]));for(var i=0;i<list.length;i++){var conf=list[i];if(!conf){continue;}if(!conf.Ipv4Enable||!__ddnsGoHasText(conf.Ipv4Domains)){__ddnsGoDisableIpv4(conf);}else{var v4=__ddnsGoFindAndroidIface('ipv4',conf.Ipv4NetInterface);if(conf.Ipv4GetType==='netInterface'&&v4&&v4.cmd){conf.Ipv4GetType='cmd';conf.Ipv4Cmd=v4.cmd;}}var v6=__ddnsGoFindAndroidIface('ipv6',conf.Ipv6NetInterface);if(conf.Ipv6GetType==='netInterface'&&v6&&v6.cmd){conf.Ipv6GetType='cmd';conf.Ipv6Cmd=v6.cmd;}}return list;}"
                 + "__ddnsGoFillNetInterfaces();document.addEventListener('DOMContentLoaded',__ddnsGoFillNetInterfaces);"
                 + "</script>\n\n<!-- 全局变量 -->";
         return patched.replace(marker, helpers);
