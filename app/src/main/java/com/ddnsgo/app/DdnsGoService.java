@@ -33,6 +33,11 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 public class DdnsGoService extends Service {
 
@@ -41,6 +46,8 @@ public class DdnsGoService extends Service {
     private static final int NOTIFICATION_ID = 1;
     private static final String ASSET_BINARY_NAME = "ddns-go";
     private static final String NATIVE_EXECUTABLE_NAME = "libddnsgo.so";
+    private static final String IPV4_ADDRESS_FILE_PREFIX = "ddns-go-ipv4-";
+    private static final String IPV6_ADDRESS_FILE_PREFIX = "ddns-go-ipv6-";
     private static final int PORT = 9876;
     private static final String LISTEN_ADDRESS = ":" + PORT;
     private static final long PROCESS_RESTART_DELAY_MS = 3000L;
@@ -94,6 +101,25 @@ public class DdnsGoService extends Service {
         return builder.toString();
     }
 
+    public static String getAndroidNetInterfacesJson(File filesDir) {
+        AndroidNetInterfaces interfaces = getAndroidNetInterfaces();
+        writeAndroidInterfaceAddressFiles(filesDir, interfaces);
+        return "{\"ipv4\":" + toInterfaceJsonArray(
+                interfaces.ipv4,
+                filesDir,
+                IPV4_ADDRESS_FILE_PREFIX
+        )
+                + ",\"ipv6\":" + toInterfaceJsonArray(
+                interfaces.ipv6,
+                filesDir,
+                IPV6_ADDRESS_FILE_PREFIX
+        ) + "}";
+    }
+
+    public static void refreshAndroidInterfaceAddressFiles(File filesDir) {
+        writeAndroidInterfaceAddressFiles(filesDir, getAndroidNetInterfaces());
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -128,6 +154,7 @@ public class DdnsGoService extends Service {
         startForeground(NOTIFICATION_ID, notification);
 
         acquireKeepAliveLocks();
+        refreshAndroidInterfaceAddressFiles(getFilesDir());
         scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
         scheduleHealthCheck(HEALTH_CHECK_INTERVAL_MS);
         startDdnsGo();
@@ -155,6 +182,7 @@ public class DdnsGoService extends Service {
                     shouldRestart = false;
                     return;
                 }
+                refreshAndroidInterfaceAddressFiles(getFilesDir());
 
                 String binaryPath = binaryFile.getAbsolutePath();
                 String configPath = getFilesDir().getAbsolutePath() + "/ddns-go-config.yaml";
@@ -201,6 +229,7 @@ public class DdnsGoService extends Service {
         if (destroyed || startRequested) {
             return;
         }
+        refreshAndroidInterfaceAddressFiles(getFilesDir());
         scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
         if (!isProcessAlive(ddnsGoProcess)) {
             Log.w(TAG, "Health check found ddns-go stopped, starting it");
@@ -363,6 +392,7 @@ public class DdnsGoService extends Service {
                 @Override
                 public void onAvailable(Network network) {
                     mainHandler.postDelayed(() -> {
+                        refreshAndroidInterfaceAddressFiles(getFilesDir());
                         scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
                         startDdnsGo();
                         runHealthCheck();
@@ -372,6 +402,7 @@ public class DdnsGoService extends Service {
                 @Override
                 public void onLost(Network network) {
                     mainHandler.postDelayed(() -> {
+                        refreshAndroidInterfaceAddressFiles(getFilesDir());
                         scheduleWatchdogAlarm(WATCHDOG_INTERVAL_MS);
                         runHealthCheck();
                     }, PROCESS_RESTART_DELAY_MS);
@@ -500,8 +531,8 @@ public class DdnsGoService extends Service {
         }
     }
 
-    private static LanAddresses getLanAddresses() {
-        LanAddresses lanAddresses = new LanAddresses();
+    private static AndroidNetInterfaces getAndroidNetInterfaces() {
+        AndroidNetInterfaces result = new AndroidNetInterfaces();
         try {
             java.util.Enumeration<NetworkInterface> interfaces =
                     NetworkInterface.getNetworkInterfaces();
@@ -511,22 +542,45 @@ public class DdnsGoService extends Service {
                         || networkInterface.isVirtual()) {
                     continue;
                 }
-                java.util.Enumeration<java.net.InetAddress> addresses =
-                        networkInterface.getInetAddresses();
+                String name = networkInterface.getName();
+                if (name == null || name.isEmpty()) {
+                    continue;
+                }
+                boolean addedIpv4 = false;
+                boolean addedIpv6 = false;
+                java.util.Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
                 while (addresses.hasMoreElements()) {
                     InetAddress address = addresses.nextElement();
-                    if (address.isLoopbackAddress() || address.isLinkLocalAddress()) {
+                    if (address.isAnyLocalAddress() || address.isLoopbackAddress()
+                            || address.isLinkLocalAddress() || address.isMulticastAddress()) {
                         continue;
                     }
-                    if (address instanceof Inet4Address && lanAddresses.ipv4 == null) {
-                        lanAddresses.ipv4 = address.getHostAddress();
-                    } else if (address instanceof Inet6Address && lanAddresses.ipv6 == null) {
-                        lanAddresses.ipv6 = stripIpv6Scope(address.getHostAddress());
+                    if (address instanceof Inet4Address && !addedIpv4) {
+                        result.ipv4.add(new AndroidNetInterface(name, address.getHostAddress()));
+                        addedIpv4 = true;
+                    } else if (address instanceof Inet6Address && !addedIpv6) {
+                        result.ipv6.add(new AndroidNetInterface(
+                                name,
+                                stripIpv6Scope(address.getHostAddress())
+                        ));
+                        addedIpv6 = true;
                     }
                 }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Unable to detect LAN address", e);
+            Log.w(TAG, "Unable to detect Android network interfaces", e);
+        }
+        return result;
+    }
+
+    private static LanAddresses getLanAddresses() {
+        AndroidNetInterfaces interfaces = getAndroidNetInterfaces();
+        LanAddresses lanAddresses = new LanAddresses();
+        if (!interfaces.ipv4.isEmpty()) {
+            lanAddresses.ipv4 = interfaces.ipv4.get(0).address;
+        }
+        if (!interfaces.ipv6.isEmpty()) {
+            lanAddresses.ipv6 = interfaces.ipv6.get(0).address;
         }
         return lanAddresses;
     }
@@ -537,6 +591,192 @@ public class DdnsGoService extends Service {
             return address.substring(0, scopeIndex);
         }
         return address;
+    }
+
+    private static void writeAndroidInterfaceAddressFiles(
+            File filesDir,
+            AndroidNetInterfaces interfaces
+    ) {
+        if (filesDir == null) {
+            return;
+        }
+        Set<String> activeIpv4Files = new HashSet<>();
+        Set<String> activeIpv6Files = new HashSet<>();
+        for (AndroidNetInterface item : interfaces.ipv4) {
+            File file = getInterfaceAddressFile(filesDir, IPV4_ADDRESS_FILE_PREFIX, item.name);
+            if (writeAddressFile(file, item.address)) {
+                activeIpv4Files.add(file.getName());
+            }
+        }
+        for (AndroidNetInterface item : interfaces.ipv6) {
+            File file = getInterfaceAddressFile(filesDir, IPV6_ADDRESS_FILE_PREFIX, item.name);
+            if (writeAddressFile(file, item.address)) {
+                activeIpv6Files.add(file.getName());
+            }
+        }
+        deleteStaleAddressFiles(filesDir, IPV4_ADDRESS_FILE_PREFIX, activeIpv4Files);
+        deleteStaleAddressFiles(filesDir, IPV6_ADDRESS_FILE_PREFIX, activeIpv6Files);
+    }
+
+    private static void deleteStaleAddressFiles(File filesDir, String prefix, Set<String> activeFiles) {
+        File[] files = filesDir.listFiles((dir, name) ->
+                name.startsWith(prefix) && name.endsWith(".txt"));
+        if (files == null) {
+            return;
+        }
+        for (File file : files) {
+            if (activeFiles.contains(file.getName())) {
+                continue;
+            }
+            if (!file.delete() && file.exists()) {
+                Log.w(TAG, "Unable to delete stale interface address file: "
+                        + file.getAbsolutePath());
+            }
+        }
+    }
+
+    private static boolean writeAddressFile(File file, String address) {
+        if (file == null || address == null || address.isEmpty()) {
+            return false;
+        }
+        try (FileOutputStream output = new FileOutputStream(file, false)) {
+            output.write(address.getBytes(StandardCharsets.UTF_8));
+            output.write('\n');
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to write interface address file: " + file.getAbsolutePath(), e);
+            return false;
+        }
+    }
+
+    private static String getInterfaceAddressCommand(
+            File filesDir,
+            String prefix,
+            String interfaceName
+    ) {
+        if (filesDir == null || interfaceName == null || interfaceName.isEmpty()) {
+            return "";
+        }
+        return "cat " + shellQuote(getInterfaceAddressFile(
+                filesDir,
+                prefix,
+                interfaceName
+        ).getAbsolutePath());
+    }
+
+    private static File getInterfaceAddressFile(
+            File filesDir,
+            String prefix,
+            String interfaceName
+    ) {
+        return new File(filesDir, prefix + sanitizeInterfaceName(interfaceName) + ".txt");
+    }
+
+    private static String sanitizeInterfaceName(String interfaceName) {
+        StringBuilder builder = new StringBuilder(interfaceName.length());
+        for (int i = 0; i < interfaceName.length(); i++) {
+            char c = interfaceName.charAt(i);
+            if ((c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')
+                    || c == '_' || c == '-' || c == '.') {
+                builder.append(c);
+            } else {
+                builder.append('_');
+            }
+        }
+        return builder.length() == 0 ? "unknown" : builder.toString();
+    }
+
+    private static String shellQuote(String value) {
+        if (value == null) {
+            return "''";
+        }
+        return "'" + value.replace("'", "'\\''") + "'";
+    }
+
+    private static String toInterfaceJsonArray(
+            List<AndroidNetInterface> interfaces,
+            File filesDir,
+            String filePrefix
+    ) {
+        StringBuilder builder = new StringBuilder("[");
+        for (int i = 0; i < interfaces.size(); i++) {
+            AndroidNetInterface item = interfaces.get(i);
+            if (i > 0) {
+                builder.append(',');
+            }
+            builder.append("{\"name\":\"")
+                    .append(jsonEscape(item.name))
+                    .append("\",\"address\":\"")
+                    .append(jsonEscape(item.address))
+                    .append("\",\"cmd\":\"")
+                    .append(jsonEscape(getInterfaceAddressCommand(filesDir, filePrefix, item.name)))
+                    .append("\"}");
+        }
+        builder.append(']');
+        return builder.toString();
+    }
+
+    private static String jsonEscape(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '"':
+                    builder.append("\\\"");
+                    break;
+                case '\\':
+                    builder.append("\\\\");
+                    break;
+                case '\b':
+                    builder.append("\\b");
+                    break;
+                case '\f':
+                    builder.append("\\f");
+                    break;
+                case '\n':
+                    builder.append("\\n");
+                    break;
+                case '\r':
+                    builder.append("\\r");
+                    break;
+                case '\t':
+                    builder.append("\\t");
+                    break;
+                default:
+                    if (c < 0x20) {
+                        String hex = Integer.toHexString(c);
+                        builder.append("\\u");
+                        for (int j = hex.length(); j < 4; j++) {
+                            builder.append('0');
+                        }
+                        builder.append(hex);
+                    } else {
+                        builder.append(c);
+                    }
+                    break;
+            }
+        }
+        return builder.toString();
+    }
+
+    private static class AndroidNetInterfaces {
+        final List<AndroidNetInterface> ipv4 = new ArrayList<>();
+        final List<AndroidNetInterface> ipv6 = new ArrayList<>();
+    }
+
+    private static class AndroidNetInterface {
+        final String name;
+        final String address;
+
+        AndroidNetInterface(String name, String address) {
+            this.name = name;
+            this.address = address;
+        }
     }
 
     private static class LanAddresses {

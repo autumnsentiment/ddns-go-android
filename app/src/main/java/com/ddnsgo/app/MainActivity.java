@@ -359,9 +359,36 @@ public class MainActivity extends AppCompatActivity {
                 .replace("document.getElementById(\"WebhookHeaders\").value", "__ddnsGoValue(\"WebhookHeaders\")");
 
         String marker = "</script>\n\n<!-- 全局变量 -->";
+        if (!patched.contains(marker)) {
+            return patched;
+        }
+        patched = patched
+                .replace("reloadConf(resp.dnsConf);", "__ddnsGoFillNetInterfaces();reloadConf(resp.dnsConf);__ddnsGoFillNetInterfaces();")
+                .replace("reloadConf(\"{{.DnsConf}}\");", "__ddnsGoRestoreNetInterfaceConf();__ddnsGoFillNetInterfaces();reloadConf(\"{{.DnsConf}}\");__ddnsGoRestoreNetInterfaceConf();__ddnsGoFillNetInterfaces();")
+                .replace("showConf(configIndex);", "__ddnsGoRestoreNetInterfaceConf();__ddnsGoFillNetInterfaces();showConf(configIndex);")
+                .replace("DnsConf: dnsConf", "DnsConf: __ddnsGoPrepareDnsConfForSave(dnsConf)");
         String helpers = "</script>\n<script>"
+                + "var __ddnsGoAndroidNetInterfaces=" + DdnsGoService.getAndroidNetInterfacesJson(getFilesDir()) + ";"
                 + "function __ddnsGoValue(id){var el=document.getElementById(id);return el?el.value:'';}"
                 + "function __ddnsGoChecked(id){var el=document.getElementById(id);return !!(el&&el.checked);}"
+                + "function __ddnsGoHasOption(sel,value){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===value){return true;}}return false;}"
+                + "function __ddnsGoFillNetSelect(id,items,helpId,helpKey){"
+                + "var sel=document.getElementById(id);if(!sel||!items||!items.length){return;}"
+                + "var selected=sel.value;var changed=false;"
+                + "for(var i=0;i<items.length;i++){var item=items[i]||{};var name=item.name||'';if(!name||__ddnsGoHasOption(sel,name)){continue;}"
+                + "var opt=document.createElement('option');opt.value=name;opt.textContent=name+(item.address?' '+item.address:'');sel.appendChild(opt);changed=true;}"
+                + "if(!changed){return;}if(selected){sel.value=selected;}"
+                + "var help=document.getElementById(helpId);if(help){help.setAttribute('data-i18n-html',helpKey);if(typeof convertDom==='function'){convertDom(help);}}"
+                + "}"
+                + "function __ddnsGoFillNetInterfaces(){var data=__ddnsGoAndroidNetInterfaces||{};"
+                + "__ddnsGoFillNetSelect('HttpInterface',[].concat(data.ipv4||[],data.ipv6||[]),'HttpInterfaceHelp','HttpInterfaceHelp');"
+                + "__ddnsGoFillNetSelect('Ipv4NetInterface',data.ipv4,'Ipv4NetInterfaceHelp','Ipv4NetInterfaceHelp');"
+                + "__ddnsGoFillNetSelect('Ipv6NetInterface',data.ipv6,'Ipv6NetInterfaceHelp','Ipv6NetInterfaceHelp');"
+                + "}"
+                + "function __ddnsGoFindAndroidIface(version,nameOrCmd){var list=((__ddnsGoAndroidNetInterfaces||{})[version]||[]);for(var i=0;i<list.length;i++){var item=list[i]||{};if(item.name===nameOrCmd||item.cmd===nameOrCmd){return item;}}return null;}"
+                + "function __ddnsGoRestoreNetInterfaceConf(){if(!window.dnsConf||!Array.isArray(window.dnsConf)){return;}for(var i=0;i<window.dnsConf.length;i++){var conf=window.dnsConf[i];if(!conf){continue;}var v4=__ddnsGoFindAndroidIface('ipv4',conf.Ipv4Cmd);if(v4&&conf.Ipv4GetType==='cmd'){conf.Ipv4GetType='netInterface';conf.Ipv4NetInterface=v4.name;}var v6=__ddnsGoFindAndroidIface('ipv6',conf.Ipv6Cmd);if(v6&&conf.Ipv6GetType==='cmd'){conf.Ipv6GetType='netInterface';conf.Ipv6NetInterface=v6.name;}}}"
+                + "function __ddnsGoPrepareDnsConfForSave(source){var list=JSON.parse(JSON.stringify(source||[]));for(var i=0;i<list.length;i++){var conf=list[i];if(!conf){continue;}var v4=__ddnsGoFindAndroidIface('ipv4',conf.Ipv4NetInterface);if(conf.Ipv4GetType==='netInterface'&&v4&&v4.cmd){conf.Ipv4GetType='cmd';conf.Ipv4Cmd=v4.cmd;}var v6=__ddnsGoFindAndroidIface('ipv6',conf.Ipv6NetInterface);if(conf.Ipv6GetType==='netInterface'&&v6&&v6.cmd){conf.Ipv6GetType='cmd';conf.Ipv6Cmd=v6.cmd;}}return list;}"
+                + "__ddnsGoFillNetInterfaces();document.addEventListener('DOMContentLoaded',__ddnsGoFillNetInterfaces);"
                 + "</script>\n\n<!-- 全局变量 -->";
         return patched.replace(marker, helpers);
     }
